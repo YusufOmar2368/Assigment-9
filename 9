@@ -1,0 +1,189 @@
+#!/usr/bin/env python3
+"""
+Create per-player season summaries (one dict/row per player) and write to CSV.
+
+Output columns:
+  nameFull,nameFirst,nameLast,first_year,last_year,seasons,count,positions,colleges,avg_height_in,avg_weight_lb
+
+Usage:
+  python3 /Users/yomar/Downloads/player_season_summaries.py [input_csv] [output_csv]
+"""
+import csv
+import os
+import sys
+from typing import Optional, Dict, List, Set
+
+
+def _to_int_year(s: Optional[str]) -> Optional[int]:
+    if s is None:
+        return None
+    s = str(s).strip()
+    if s == "":
+        return None
+    try:
+        return int(float(s))
+    except Exception:
+        digits = "".join(ch for ch in s if ch.isdigit())
+        return int(digits) if digits else None
+
+
+def _to_float(s: Optional[str]) -> Optional[float]:
+    if s is None:
+        return None
+    try:
+        return float(str(s).strip())
+    except Exception:
+        cleaned = "".join(ch for ch in str(s) if ch.isdigit() or ch in ".-")
+        try:
+            return float(cleaned) if cleaned else None
+        except Exception:
+            return None
+
+
+def _pick(row: dict, *keys):
+    for k in keys:
+        v = row.get(k)
+        if v not in (None, ""):
+            return v
+    return None
+
+
+def build_player_summaries(input_csv: str,
+                           output_csv: Optional[str] = None) -> str:
+    """
+    Read input CSV, aggregate rows by player (prefer nameFull then first+last)
+    and write a summary CSV with one row per player. Returns output path.
+    """
+    if not os.path.isfile(input_csv):
+        raise FileNotFoundError(input_csv)
+    if output_csv is None:
+        output_csv = os.path.join(os.path.dirname(input_csv), "player_season_summaries.csv")
+
+    players: Dict[str, Dict] = {}
+
+    with open(input_csv, newline="", encoding="utf-8") as inf:
+        reader = csv.DictReader(inf)
+        if not reader.fieldnames:
+            raise ValueError("Input CSV has no header")
+
+        # heuristics for common field names
+        year_keys = [h for h in reader.fieldnames if "year" in h.lower()] or ["combineYear", "year"]
+        pos_keys = [h for h in reader.fieldnames if "position" in h.lower()] or ["combinePosition", "position"]
+        college_keys = [h for h in reader.fieldnames if "college" in h.lower()] or ["college", "collegeId", "team", "school"]
+        height_keys = [h for h in reader.fieldnames if "height" in h.lower()] or ["heightInches", "combineHeight", "height"]
+        weight_keys = [h for h in reader.fieldnames if "weight" in h.lower()] or ["weight", "combineWeight"]
+
+        for row in reader:
+            name_full = (row.get("nameFull") or "").strip()
+            if not name_full:
+                first = (row.get("nameFirst") or "").strip()
+                last = (row.get("nameLast") or "").strip()
+                name_full = (first + " " + last).strip()
+            if not name_full:
+                continue
+
+            # canonical key
+            key = name_full.lower()
+
+            # discover year column value
+            year_val = None
+            for k in year_keys:
+                if k in row:
+                    year_val = _to_int_year(row.get(k))
+                    if year_val is not None:
+                        break
+
+            pos = None
+            for k in pos_keys:
+                if k in row and row.get(k) not in (None, ""):
+                    pos = row.get(k).strip()
+                    break
+            pos = pos or "UNKNOWN"
+
+            college = None
+            for k in college_keys:
+                if k in row and row.get(k) not in (None, ""):
+                    college = row.get(k).strip()
+                    break
+
+            height = None
+            for k in height_keys:
+                if k in row and row.get(k) not in (None, ""):
+                    height = _to_float(row.get(k))
+                    break
+
+            weight = None
+            for k in weight_keys:
+                if k in row and row.get(k) not in (None, ""):
+                    weight = _to_float(row.get(k))
+                    break
+
+            p = players.setdefault(key, {
+                "nameFull": name_full,
+                "nameFirst": (row.get("nameFirst") or "").strip(),
+                "nameLast": (row.get("nameLast") or "").strip(),
+                "seasons": set(),           # Set[int]
+                "positions": set(),         # Set[str]
+                "colleges": set(),          # Set[str]
+                "heights": [],              # List[float]
+                "weights": [],              # List[float]
+            })
+
+            if year_val is not None:
+                p["seasons"].add(year_val)
+            if pos:
+                p["positions"].add(pos)
+            if college:
+                p["colleges"].add(college)
+            if height is not None:
+                p["heights"].append(height)
+            if weight is not None:
+                p["weights"].append(weight)
+
+    # write output CSV
+    fieldnames = [
+        "nameFull", "nameFirst", "nameLast",
+        "first_year", "last_year", "seasons", "count",
+        "positions", "colleges", "avg_height_in", "avg_weight_lb"
+    ]
+    with open(output_csv, "w", newline="", encoding="utf-8") as outf:
+        writer = csv.DictWriter(outf, fieldnames=fieldnames)
+        writer.writeheader()
+        for p in players.values():
+            seasons: Set[int] = p["seasons"]
+            if seasons:
+                first_year = min(seasons)
+                last_year = max(seasons)
+                seasons_str = ";".join(str(y) for y in sorted(seasons))
+                count = len(seasons)
+            else:
+                first_year = ""
+                last_year = ""
+                seasons_str = ""
+                count = 0
+
+            avg_h = round(sum(p["heights"]) / len(p["heights"]), 2) if p["heights"] else ""
+            avg_w = round(sum(p["weights"]) / len(p["weights"]), 2) if p["weights"] else ""
+
+            writer.writerow({
+                "nameFull": p["nameFull"],
+                "nameFirst": p["nameFirst"],
+                "nameLast": p["nameLast"],
+                "first_year": first_year,
+                "last_year": last_year,
+                "seasons": seasons_str,
+                "count": count,
+                "positions": ";".join(sorted(p["positions"])),
+                "colleges": ";".join(sorted(p["colleges"])),
+                "avg_height_in": avg_h,
+                "avg_weight_lb": avg_w,
+            })
+
+    return output_csv
+
+
+if __name__ == "__main__":
+    inp = sys.argv[1] if len(sys.argv) > 1 else "/Users/yomar/Downloads/combine.csv"
+    outp = sys.argv[2] if len(sys.argv) > 2 else None
+    path = build_player_summaries(inp, outp)
+    print(f"Wrote player season summaries) to {path}")
